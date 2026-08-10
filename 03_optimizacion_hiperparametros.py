@@ -1,43 +1,4 @@
-"""
-================================================================================
-OPTIMIZACIÓN DE HIPERPARÁMETROS DE MAXENT
-Framework matemático-estadístico para SDMs
---------------------------------------------------------------------------------
-Autor     : [Tu nombre]
-Tesis     : Distribución potencial de manglares en Cuba — MaxEnt
-Lenguaje  : Python 3.10+
-Librerías : elapid, numpy, pandas, scikit-learn, matplotlib, seaborn
---------------------------------------------------------------------------------
-Descripción:
-    Este script realiza una búsqueda exhaustiva (grid search) sobre el espacio
-    de hiperparámetros del modelo MaxEnt:
-        - Feature classes (FC): combinaciones de L, Q, P, H, T
-        - Regularization multiplier (RM): grilla en [0.5, 4.0]
 
-    Criterios de selección:
-        1. AICc      → parsimonia formal (Akaike corregido), calculado sobre
-                       el modelo completo (todos los datos).
-        2. AUC diff  → sobreajuste (AUC_train - AUC_test, por CV k-fold).
-                       Valores cercanos a 0 indican buena generalización;
-                       valores grandes y positivos indican sobreajuste.
-        3. AUC test  → poder discriminativo medio en el conjunto de prueba
-                       de cada fold.
-
-    La selección del modelo óptimo balancea tener un AICc bajo (parsimonia)
-    y un AUC diff bajo (buena generalización, ausencia de sobreajuste).
-
-    Salidas:
-        - Tabla completa de resultados (CSV)
-        - Heatmaps AICc, AUC y AUC diff (PNG)
-        - Gráfico de Pareto AICc vs AUC diff (PNG)
-        - Modelo óptimo serializado (pkl)
-        - Reporte resumen en consola
-================================================================================
-"""
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 0. IMPORTS
-# ─────────────────────────────────────────────────────────────────────────────
 import warnings
 import itertools
 import pickle
@@ -50,17 +11,16 @@ import seaborn as sns
 from sklearn.model_selection import StratifiedKFold
 from sklearn.metrics import roc_auc_score
 from elapid import MaxentModel
-
+from sklearn.cluster import KMeans
 warnings.filterwarnings("ignore")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 1. CONFIGURACIÓN
-# ─────────────────────────────────────────────────────────────────────────────
 
-PRESENCE_CSV   = "/Users/eryuer/Desktop/tesis/Final/Modelo/Maxent_input/presencias_mrmr.csv"
-BACKGROUND_CSV = "/Users/eryuer/Desktop/tesis/Final/Modelo/Maxent_input/background_mrmr.csv"
+# 1. CONFIGURACIÓN
+
+PRESENCE_CSV   = ""
+BACKGROUND_CSV = ""
 COORD_COLS     = ["lat", "lon"]
-OUTPUT_DIR     = Path("/Users/eryuer/Desktop/tesis/Final/Modelo/resultados_optimizacionv6")
+OUTPUT_DIR     = Path("")
 
 RM_VALUES          = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0]
 FC_CANDIDATES      = ["linear", "quadratic", "product", "hinge", "threshold"]
@@ -69,10 +29,7 @@ FC_MAX_SIZE        = 5
 N_FOLDS            = 5
 RANDOM_STATE       = 42
 
-
-# ─────────────────────────────────────────────────────────────────────────────
 # 2. FUNCIONES AUXILIARES
-# ─────────────────────────────────────────────────────────────────────────────
 
 def load_data(presence_csv: str, background_csv: str, coord_cols: list):
     pres = pd.read_csv(presence_csv)
@@ -94,34 +51,21 @@ def load_data(presence_csv: str, background_csv: str, coord_cols: list):
     print(f"  Variables  : {feature_cols}")
     return X, y, coords
 
-from sklearn.cluster import KMeans
-
 def make_spatial_folds(coords: np.ndarray, y: np.ndarray,
                        n_folds: int, random_state: int) -> np.ndarray:
-    """
-    Asigna cada punto a un fold geográfico usando k-means sobre las
-    coordenadas. Puntos del mismo bloque espacial van siempre al mismo fold,
-    evitando la autocorrelación espacial entre train y test.
 
-    Retorna un array fold_ids de longitud N con valores en {0, ..., n_folds-1}.
-    """
     km = KMeans(n_clusters=n_folds, random_state=random_state, n_init=10)
-    fold_ids = km.fit_predict(coords)          # cluster por geografía
+    fold_ids = km.fit_predict(coords)       
 
-    # Verificar que cada fold tenga presencias y background
     for f in range(n_folds):
         mask = fold_ids == f
         if y[mask].sum() == 0 or (1 - y[mask]).sum() == 0:
-            print(f"  ⚠️  Fold geográfico {f} sin presencias o sin background. "
+            print(f"  Fold geográfico {f} sin presencias o sin background. "
                   f"Considera reducir n_folds.")
     return fold_ids
 
 def compute_aicc(log_likelihood: float, n_params: int, n_presence: int) -> float:
-    """
-    AICc = 2k - 2·LL + 2k(k+1)/(n-k-1)
 
-    Referencia: Warren & Seifert (2011). Ecological Applications, 21(2), 335–342.
-    """
     k = n_params
     n = n_presence
     if k == 0 or n - k - 1 <= 0:
@@ -133,18 +77,7 @@ def compute_aicc(log_likelihood: float, n_params: int, n_presence: int) -> float
 
 def compute_log_likelihood(raw_model: MaxentModel,
                            X: pd.DataFrame, y: np.ndarray) -> float:
-    """
-    Log-verosimilitud de MaxEnt sobre los datos (X, y) usando un modelo
-    ya entrenado con transform='raw'.
 
-    LL = Σ_{pres} log(f_raw(x)) - n_pres · log( mean_{bg}(f_raw(x)) )
-
-    Separa presencias y background según la etiqueta y, de modo que puede
-    usarse tanto en datos de entrenamiento como en datos de test del mismo
-    fold sin reentrenar.
-
-    Referencia: Phillips & Dudík (2008), Warren & Seifert (2011).
-    """
     raw_scores = np.asarray(raw_model.predict(X), dtype=float)
     y_arr      = np.asarray(y)
 
@@ -163,7 +96,7 @@ def compute_log_likelihood(raw_model: MaxentModel,
 
 
 def get_n_nonzero_params(model: MaxentModel) -> int:
-    """Número de coeficientes no nulos (k para AICc)."""
+
     for attr in ("coef_", "estimator.coef_", "estimator_.coef_"):
         try:
             obj = model
@@ -180,19 +113,14 @@ def fc_label(feature_types: list) -> str:
               "hinge": "H", "threshold": "T"}
     return "".join(abbrev[f] for f in feature_types if f in abbrev)
 
-
-# ─────────────────────────────────────────────────────────────────────────────
 # 3. MÉTRICAS DE VALIDACIÓN CRUZADA  (AUC test + AUC diff)
-# ─────────────────────────────────────────────────────────────────────────────
+
 
 def cv_metrics(X: pd.DataFrame, y: np.ndarray,
                feature_types: list, beta_multiplier: float,
-               fold_ids: np.ndarray,               # ← NUEVO parámetro
+               fold_ids: np.ndarray,             
                random_state: int) -> dict:
-    """
-    Validación cruzada con folds geográficos precomputados.
-    fold_ids[i] indica a qué fold pertenece el punto i.
-    """
+
     n_folds   = len(np.unique(fold_ids))
     aucs_test = []
     auc_diffs = []
@@ -238,12 +166,7 @@ def cv_metrics(X: pd.DataFrame, y: np.ndarray,
             "auc_diff_mean": auc_diff_mean, "auc_diff_std": auc_diff_std}
 
 
-
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # 4. GRID SEARCH PRINCIPAL
-# ─────────────────────────────────────────────────────────────────────────────
 
 def run_grid_search(X, y, coords, rm_values, fc_candidates, fc_min, fc_max,
                     n_folds, random_state, output_dir) -> pd.DataFrame:
@@ -251,7 +174,6 @@ def run_grid_search(X, y, coords, rm_values, fc_candidates, fc_min, fc_max,
     output_dir.mkdir(parents=True, exist_ok=True)
     n_presence = int(y.sum())
     
-    #------ Folds geograficos--------
     print("\n Calculando folds geograficos")
     folds_ids = make_spatial_folds(coords, y, n_folds, random_state)
 
@@ -271,7 +193,6 @@ def run_grid_search(X, y, coords, rm_values, fc_candidates, fc_min, fc_max,
         label = fc_label(fc)
         print(f"  [{counter:>4}/{total}]  FC={label:<8}  RM={rm:.1f}  ", end="", flush=True)
 
-        # ── AICc sobre todos los datos (modelo completo) ──────────────────
         model_raw_full = MaxentModel(
             feature_types   = fc,
             beta_multiplier = rm,
@@ -297,7 +218,6 @@ def run_grid_search(X, y, coords, rm_values, fc_candidates, fc_min, fc_max,
             aicc_val, n_params, ll = np.inf, 0, -np.inf
             model_cll_full = None
 
-        # ── AUC test y AUC diff por CV ────────────────────────────────────
         cv = cv_metrics(X, y, fc, rm, folds_ids, random_state)
 
         print(f"AICc={aicc_val:>10.2f}  "
@@ -331,10 +251,7 @@ def run_grid_search(X, y, coords, rm_values, fc_candidates, fc_min, fc_max,
     print(f"\n  Resultados guardados en: {output_dir / 'grid_search_results.csv'}")
     return results_df
 
-
-# ─────────────────────────────────────────────────────────────────────────────
 # 5. SELECCIÓN DEL MODELO ÓPTIMO
-# ─────────────────────────────────────────────────────────────────────────────
 
 def select_best_models(results_df: pd.DataFrame) -> dict:
     valid = results_df.dropna(subset=["aicc", "auc_mean", "auc_diff_mean"])
@@ -343,7 +260,6 @@ def select_best_models(results_df: pd.DataFrame) -> dict:
     idx_aicc = valid["aicc"].idxmin()
     idx_auc  = valid["auc_mean"].idxmax()
 
-    # ── Modelo balanceado: AICc + AUC diff ────────────────────────────────
     # Normaliza ambos criterios al rango [0, 1] y selecciona el mínimo
     # de la suma ponderada (igual peso por defecto).
     aicc_norm = (valid["aicc"] - valid["aicc"].min()) / \
@@ -383,10 +299,8 @@ def select_best_models(results_df: pd.DataFrame) -> dict:
         "pareto_front"  : pareto_front,
     }
 
-
-# ─────────────────────────────────────────────────────────────────────────────
 # 6. VISUALIZACIONES
-# ─────────────────────────────────────────────────────────────────────────────
+
 
 def _heatmap(pivot, title, cbar_label, output_path,
              cmap="RdYlGn_r", vmin=None, vmax=None, fmt=".1f",
@@ -437,10 +351,6 @@ def plot_heatmap_auc(results_df, output_dir):
 
 
 def plot_heatmap_auc_diff(results_df, output_dir):
-    """
-    Heatmap del AUC diff medio (AUC_train - AUC_test) sobre (FC × RM).
-    Valores cercanos a 0 indican buena generalización; >> 0 indica sobreajuste.
-    """
     valid = results_df.dropna(subset=["auc_diff_mean"]).copy()
     pivot = valid.pivot_table(index="fc_label", columns="rm",
                               values="auc_diff_mean", aggfunc="mean")
@@ -517,10 +427,7 @@ def plot_delta_aicc(results_df, output_dir, top_n=20):
     plt.close()
     print(f"  Guardado: {path}")
 
-
-# ─────────────────────────────────────────────────────────────────────────────
 # 7. REPORTE FINAL
-# ─────────────────────────────────────────────────────────────────────────────
 
 def print_report(best, results_df):
     sep = "─" * 65
@@ -553,10 +460,8 @@ def print_report(best, results_df):
     print(f"\n  Modelos con ΔAICc < 2 (soporte sustancial): {len(supported)}")
     print(f"\n{'═'*65}\n")
 
-
-# ─────────────────────────────────────────────────────────────────────────────
 # 8. PIPELINE PRINCIPAL
-# ─────────────────────────────────────────────────────────────────────────────
+
 
 def main():
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
